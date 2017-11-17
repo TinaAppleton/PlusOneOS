@@ -85,8 +85,8 @@ _start:
 	movl $(boot_pagetab1 - 0xC0000000 + 0x003), boot_pagedir - 0xC0000000 + 0
 	movl $(boot_pagetab1 - 0xC0000000 + 0x003), boot_pagedir - 0xC0000000 + 768 * 4
 	# Map the page directory in to the last portion of memory.
-	movl $(boot_pagedir - 0xC0000000 + 0x003), boot_pagedir - 0xC0000000 + 1023 * 4
-	#movl $(boot_pagetab2 - 0xC0000000 + 0x003), boot_pagedir - 0xC0000000 + 1023 * 4
+	movl $(boot_pagedir - 0xC0000000 + 0x003), boot_pagetab2 - 0xC0000000 + 1023 * 4
+	movl $(boot_pagetab2 - 0xC0000000 + 0x003), boot_pagedir - 0xC0000000 + 1023 * 4
 
 	# Set cr3 to the address of the boot_pagedir.
 	movl $(boot_pagedir - 0xC0000000), %ecx
@@ -114,10 +114,10 @@ _start:
 	# Set up the stack.
 	mov $stack_top, %esp
 	
-	movl $(boot_pagedir), %edi
+	#movl $(boot_pagedir), %edi
 	
 	push %ebx
-	push %edi
+	#push %edi
 
 	# Enter the high-level kernel.
 	call kernel_main

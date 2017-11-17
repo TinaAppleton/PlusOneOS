@@ -5,110 +5,76 @@
 static inline void reloadPaging();
 extern uint32_t _kernel_start;
 extern uint32_t _kernel_end;
-const uint32_t PHYS_DIR_SIZE  = 131072;
+const uint32_t PHYS_DIR_SIZE  = 1048576;
 
-uint32_t phys_address_directory[PHYS_DIR_SIZE];
+uint32_t phys_address_directory[PHYS_DIR_SIZE/4];
+/*
+ *	PHYSICAL DIRECTORY STRUCTURE
+ *	each entry represents 1 entry in the page directory
+ *	1st bit = page present, set to 1 if it is linked to a page table entry
+ *	2nd bit = user bit, set to 1 if user accessible, 0 if os only
+ *	3rd bit = removable bit, set to 1 if removable, 0 if necessary to remain
+ *	remaining bits = currently unused
+
+*/
 
 /****************************
 *	Paging class functions	*
 *			start			*
 ****************************/
-Paging::Paging(uint32_t* page_dir) {
-	//set up a table to store the page directory at the end of
-	uint32_t directory_table[1024] __attribute__((aligned(4096)));
+Paging::Paging() {
+	//set up the location of the page directory;
+	page_directory = (uint32_t*)0xFFFFF000;
 	
-	//clear the table so that all pages are set to not present
+	//set up the physical directory;
+	phys_directory = (uint8_t*)phys_address_directory;
+	
 	uint32_t i;
-	for(i = 0; i < 1024; i++)
-	{
-		directory_table[i] = 0;
-	}
 	
-	//map the page directory to the last entry of the page table;
-	directory_table[1023] = ((uint32_t)page_dir * 0xFFFFF000) + 3;
-
-	//add the new table to the directory
-	page_dir[1023] = ((uint32_t)directory_table) - 0xC0000000 + 3;
-	
-	//reload page table
-	reloadPaging(); 
-	
-	//clear the physical page directory
-	for(i = 0; i < PHYS_DIR_SIZE; i++)
-	{
-		phys_address_directory[i] = 0;
+	//now clear the physical directory
+	for(i = 0; i < PHYS_DIR_SIZE; i++) {
+		phys_directory[i] = 0;
 	}
 	
 	//initialize helper variables for establishing the kernel physical pages
 	uint32_t kernel_length = _kernel_start - _kernel_end;
-	uint32_t kernel_pages = kernel_length/4096;
+	uint32_t kernel_pages = (kernel_length/4096)+1;
 	uint32_t kernel_first_page = (_kernel_start - 0xC0000000) / 4096;
 
 	//set the kernel pages to used
 	for(i = 0; i < kernel_pages; i++)
 	{
-		uint32_t cur_phys_page = kernel_first_page + i;
-		uint32_t phys_dir_index = cur_phys_page / 32;
-		uint32_t phys_dir_offset = cur_phys_page % 32;
-		phys_address_directory[phys_dir_index] = ((uint32_t)1) << phys_dir_offset;
+		phys_directory[kernel_first_page+i] = 1;
 	}
 	
 	//set the terminal memory page to used
 	uint32_t terminal_phys_page = 0x000B8000 / 4096;
-	uint32_t term_phys_dir_index = terminal_phys_page / 32;
-	uint32_t term_phys_dir_offset = terminal_phys_page % 32;
-	phys_address_directory[term_phys_dir_index] = ((uint32_t)1) << term_phys_dir_offset;
+	phys_directory[terminal_phys_page] = 1;
 	
 	//set the page directory area to used
-	phys_address_directory[PHYS_DIR_SIZE - 1] = 0x80000000;
+	uint32_t base_entry = ((uint32_t)page_directory) / 4096;
+	for(i = 0; i < 1024; i++) {
+		phys_directory[base_entry+i] = 1;
+	}
 	
-	//set the major class variables
-	this->phys_directory = phys_address_directory;
-	this->page_directory = (uint32_t*)(0x3E7000);
 }
+
+
 
 uint32_t* Paging::allocPage() {
 	//find first free physical page
 	
-	int arrayIndex, bitIndex;
-	arrayIndex = 0;
-	bitIndex = 0;
-	int i = 0;
-	while((i < PHYS_DIR_SIZE) && arrayIndex == 0) {
-		if(!(phys_directory[i] == 0xFFFFFFFF)) {
-			//one of the pages at this index is free, find it
-			int b = 0;
-			while((b < 32) && (bitIndex == 0)) {
-				if(((1 << b) & phys_directory[i]) == 0) {
-					//this bit index is free, claim it
-					phys_directory[i] = phys_directory[i] | (1 << b);
-					arrayIndex = i;
-					bitIndex = b;
-				}
-				b++;
-			}
-		}
-		i++;
-	}
-	// test if a free physical index was found, if not, return null pointer
-	if(arrayIndex == 0 || bitIndex == 0)
+	uint32_t* phys_addr = findFirstFreePhys((uint32_t*)0);
+
+	// find a free virtual page
+	uint32_t* virt_addr = findFirstFreeVirt((uint32_t*)0);
+	
+	if(virt_addr == 0 || phys_addr == 0) 
 		return 0;
 	
-	// find a free virtual page
-	int d;
-	for(d = 0; d < 1024; d++) {
-		int t;
-		for (t = 0; t < 1024; t++) {
-			uint32_t* page_tbl = (uint32_t*)page_directory[d];
-			if((page_tbl[t] & 1) == 0) {
-				//found a free page, grab it
-				page_tbl[t] = ((((arrayIndex * 32) + bitIndex) * 4096) + 3);
-				reloadPaging();
-				uint32_t* retval = (uint32_t*)(((d * 1024) + t) * 4096);
-				return retval;
-			}
-		}
-	}
+	setPhysPage(phys_addr, true, true, false);
+	setVirtPage(phys_addr, virt_addr, true, true, false);
+	return virt_addr;
 	
 	// if it hasn't returned by now, no free pages left. return 0
 	return 0;
@@ -128,7 +94,16 @@ uint32_t* Paging::allocPageAtPhys(uint32_t* phys_addr) {
 }
 
 uint32_t* Paging::allocPageAtVirt(uint32_t* virt_addr) {
+	if(isVirtPagePresent(virt_addr))
+		return getPhysAddrFromVirt(virt_addr);
 	
+	uint32_t* phys_addr = findFirstFreePhys((uint32_t*)0);
+	if(phys_addr == 0)
+		return 0;
+	
+	setPhysPage(phys_addr, true, true, false);
+	setVirtPage(phys_addr, virt_addr, true, true, false);
+	return phys_addr;
 }
 
 void Paging::freePage(uint32_t* virt_addr) {
@@ -141,24 +116,14 @@ bool Paging::isPhysPagePresent(uint32_t* phys_addr) {
 	
 	uint32_t phys_page = ((uint32_t)phys_addr) / 4096;
 	
-	uint32_t index = phys_page / 32;
-	uint32_t offset = phys_page % 32;
-	
 	//check to see if the page is actually in use. If yes,
 	//free it. if not, return
-	if(phys_address_directory[index] == 0) {
+	if(phys_directory[phys_page] == 0) {
 		//no pages at this index are in use, return
 		return false;
 	} else {
-		//check to see if the specific page is in use
-		uint32_t checker = phys_address_directory[index];
-		if((checker & (((uint32_t)1) << offset)) == 0) {
-			//the specific page is not set, return
-			return false;
-		} else {
-			//the page is present
-			return true;
-		}
+		//the page is present
+		return true;
 	}
 	
 	return false;
@@ -182,32 +147,31 @@ bool Paging::isVirtPagePresent(uint32_t* virt_addr) {
 	return false;
 }
 
+
 void Paging::freePhysPage(uint32_t* phys_addr) {
 	
 	//set up helper variables
 	uint32_t phys_page = ((uint32_t)phys_addr) / 4096;
-	uint32_t index = phys_page / 32;
-	uint32_t offset = phys_page % 32;
+
 	
 	//check to see if it's a bad page
-	if(index > (PHYS_DIR_SIZE - 1))
+	if(phys_page > (PHYS_DIR_SIZE - 1))
 		return;
 	
 	//check to see if the page is actually in use. If yes,
 	//free it. if not, return
-	if(phys_address_directory[index] == 0) {
+	if(phys_directory[phys_page] == 0) {
 		//no pages at this index are in use, return
 		return;
 	} else {
 		//check to see if the specific page is in use
-		uint32_t checker = phys_address_directory[index];
-		if((checker & (((uint32_t)1) << offset)) == 0) {
+		uint32_t checker = phys_directory[phys_page];
+		if((checker & 1) == 0) {
 			//the specific page is not set, return
 			return;
 		} else {
 			//clear the page
-			uint32_t ander = ~(((uint32_t)1) << offset);
-			phys_address_directory[index] = phys_address_directory[index] & ander;
+			phys_directory[phys_page] = 0;
 		}
 	}
 }
@@ -248,10 +212,8 @@ uint32_t* Paging::getVirtAddrFromPhys(uint32_t* phys_addr) {
 	uint32_t addr_offset = ((uint32_t)phys_addr) % 4096;
 	uint32_t aligned_phys = ((uint32_t)phys_addr) - addr_offset;
 	uint32_t phys_page = ((uint32_t)phys_addr) / 4096;
-	uint32_t phys_dir_index = phys_page / 32;
-	uint32_t phys_dir_offset = phys_page % 32;
 	
-	if(!isPhysPagePresent(phys_addr))
+	if(!isPhysPagePresent((uint32_t*)phys_page))
 		return virt_addr;
 	
 	int d, t;
@@ -302,9 +264,19 @@ uint32_t Paging::setupMultiboot(multiboot_info_t* multiboot) {
 
 void Paging::printPageDir() {
 	for(int i = 0; i < 1024; i++) {
-		terminal_writeHex(page_directory[1023]);
+		//terminal_writeHex(page_directory[i]);
 		terminal_writestring("\n");
 	}
+}
+
+uint32_t* Paging::findFirstFreePhys(uint32_t* starting_addr) {
+	uint32_t start_page = ((uint32_t)starting_addr)/4096;
+	
+	for(uint32_t i = start_page; i < PHYS_DIR_SIZE; i++) {
+		if(phys_directory[i] == 0)
+			return (uint32_t*)(i*4096);
+	}
+	return 0;
 }
 
 uint32_t* Paging::findFirstFreeVirt(uint32_t* starting_addr) {
@@ -322,7 +294,7 @@ uint32_t* Paging::findFirstFreeVirt(uint32_t* starting_addr) {
 	while((!success_d) && (d < 1024))
 	{
 		uint32_t* page_tbl = (uint32_t*)page_directory[d];
-		if(((uint32_t)page_tbl) & ((uint32_t)1) == 1) {
+		if((((uint32_t)page_tbl) & (uint32_t)1) == 1) {
 			while((!success_t) && (t < 1024)) {
 				if((page_tbl[t] & ((uint32_t)1)) == 0) {
 					//free page!
@@ -346,9 +318,23 @@ uint32_t* Paging::findFirstFreeVirt(uint32_t* starting_addr) {
 	
 	return ret_addr;
 }
+
 bool Paging::setPhysPage(uint32_t* address, bool present, bool removable, bool isUserPage) {
-	return false;
+	uint32_t page = (uint32_t)address / 4096;
+	
+	uint32_t adder = 0;
+	if(present)
+		adder += 1;
+	if(isUserPage)
+		adder += 2;
+	if(removable)
+		adder += 4;
+	
+	phys_directory[page] = adder;
+	
+	return true;
 }
+
 bool Paging::setVirtPage(uint32_t* phys_address, uint32_t* virt_address, bool present, bool writable, bool isUserPage) {
 	uint32_t* aligned_phys = (uint32_t*)(phys_address - ((uint32_t)phys_address % 4096));
 	uint32_t page = (uint32_t)virt_address / 4096;
@@ -376,6 +362,7 @@ bool Paging::setVirtPage(uint32_t* phys_address, uint32_t* virt_address, bool pr
 	
 	return true;
 }
+
 /****************************
 *	Paging class functions	*
 *			 end			*
